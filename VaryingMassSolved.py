@@ -22,7 +22,12 @@ Phases:
   3) Hover controller (PD) for t_hover (or until z_floor)
   4) Final approach controller (PD) until z_floor
 
-We still choose burn-start height z_burn such that v_touchdown ~ v_target (~0).
+We choose burn-start height z_burn such that v_touchdown ~ v_target (~0).
+
+Key fixes implemented:
+  - FIX 1: treat p.t_max as *duration per phase* (t_span=(t0, t0+p.t_max) for phases 2-4)
+  - FIX 2: z_burn search uses bracketing/bisection when possible, otherwise falls back to
+           minimizing |v_touchdown - v_target| (prevents "nonsense" when no sign change exists).
 """
 
 from dataclasses import dataclass
@@ -58,6 +63,7 @@ class Params:
     Cd: float = 0.47
 
     # Integration
+    # Interpreted as "max integration duration per phase" (not absolute wall-clock time).
     t_max: float = 400.0
     max_step: float = 0.05
 
@@ -291,6 +297,7 @@ def simulate_for_zburn(z0: float, v0: float, p: Params, z_burn: float, eps: floa
 
     z_at_burn0 = float(y_burn0[0])
     if do_hover and (z_at_burn0 <= p.z_hover_start + eps):
+        # Already below hover start: skip burn and enter hover (this is why we constrain search).
         t_hover_start = float(t_burn)
         y_hover0 = y_burn0
         t_burn_seg = np.array([])
@@ -301,9 +308,10 @@ def simulate_for_zburn(z0: float, v0: float, p: Params, z_burn: float, eps: floa
             hs = hover_start_event(p.z_hover_start)
             events_burn = [hs, td]
 
+        # FIX 1: p.t_max is a duration from t_burn
         sol_burn = solve_ivp(
             fun=make_rhs(p, burning=True),
-            t_span=(t_burn, p.t_max),
+            t_span=(t_burn, t_burn + p.t_max),
             y0=y_burn0,
             events=events_burn,
             max_step=p.max_step,
@@ -395,9 +403,10 @@ def simulate_for_zburn(z0: float, v0: float, p: Params, z_burn: float, eps: floa
     t_hover_end = t_hover_start + float(p.t_hover)
     rhs_hover = make_ctrl_rhs(p, z_ref_fn=lambda t: p.z_ref, v_ref_fn=lambda t: 0.0)
 
+    # FIX 1: p.t_max is a duration from t_hover_start
     sol_hover = solve_ivp(
         fun=rhs_hover,
-        t_span=(t_hover_start, p.t_max),
+        t_span=(t_hover_start, t_hover_start + p.t_max),
         y0=y_hover0,
         events=[td, time_event(t_hover_end)],
         max_step=p.max_step,
@@ -459,7 +468,6 @@ def simulate_for_zburn(z0: float, v0: float, p: Params, z_burn: float, eps: floa
         }, p)
 
     # ---- Phase 4: Final approach ----
-    # (kept in the simulation outputs, but plotting is optional)
     t_land_start = float(sol_hover.t_events[1][0])
     y_land0 = sol_hover.y_events[1][0]
 
@@ -469,9 +477,10 @@ def simulate_for_zburn(z0: float, v0: float, p: Params, z_burn: float, eps: floa
         v_ref_fn=lambda t: p.v_land_ref,
     )
 
+    # FIX 1: p.t_max is a duration from t_land_start
     sol_land = solve_ivp(
         fun=rhs_land,
-        t_span=(t_land_start, p.t_max),
+        t_span=(t_land_start, t_land_start + p.t_max),
         y0=y_land0,
         events=[td],
         max_step=p.max_step,
@@ -534,71 +543,139 @@ def simulate_for_zburn(z0: float, v0: float, p: Params, z_burn: float, eps: floa
 
 # -------------------- Search for z_burn --------------------
 
-def find_zburn_for_target_touchdown_speed(z0: float, v0: float, p: Params,
-                                         v_target: float = 0.0,
-                                         tol_v: float = 0.25,
-                                         max_iter: int = 60):
-    z_lo = float(p.z_floor)
-    if z0 <= z_lo:
-        raise ValueError(f"z0 must be > z_floor ({z_lo}).")
+def find_zburn_for_target_touchdown_speed(
+    z0: float,
+    v0: float,
+    p: Params,
+    v_target: float = 0.0,
+    tol_v: float = 0.25,
+    max_iter: int = 60,
+):
+    """
+    Find z_burn in [z_lo, z0] so v_touchdown ~ v_target.
 
+    Behavior:
+      - If hover is enabled, enforce z_burn > z_hover_start (small margin) so we preserve:
+            coast -> burn -> hover
+        instead of:
+            coast -> (already below hover_start) -> hover   [burn skipped]
+      - Try sign-bracket + bisection when possible.
+      - If no sign change exists (common when v_target=0), fall back to minimizing |error|.
+    """
+    z_lo = float(p.z_floor)
+
+    do_hover = bool(p.enable_hover and (p.t_hover > 0.0) and (p.z_hover_start > 0.0))
+    if do_hover and (z0 > p.z_hover_start):
+        margin = max(1.0, 10.0 * float(p.z_floor))
+        z_lo2 = max(z_lo, float(p.z_hover_start + margin))
+        if z_lo2 > z_lo:
+            print(
+                f"[INFO] Hover enabled: constraining z_burn search to z_burn >= {z_lo2:.3f} m "
+                f"(> z_hover_start={p.z_hover_start:.3f} m) to preserve coast->burn->hover."
+            )
+        z_lo = z_lo2
+
+    if z0 <= z_lo:
+        raise ValueError(f"z0 must be > search lower bound ({z_lo}).")
+
+    cache = {}
+
+    def sim(zb: float):
+        k = round(float(zb), 6)
+        if k in cache:
+            return cache[k]
+        out = simulate_for_zburn(z0, v0, p, float(zb))
+        cache[k] = out
+        return out
+
+    # ----- Phase A: coarse scan -----
     samples = np.linspace(z_lo, z0, 41)
-    vals = []
+    vals = []   # [(zb, f, out), ...] where f = v_touchdown - v_target
+    best = None # (err, zb, out)
 
     for zb in samples:
-        out = simulate_for_zburn(z0, v0, p, zb)
-        if out is None or out["v_touchdown"] is None:
+        out = sim(float(zb))
+        if out is None or out.get("v_touchdown") is None:
             continue
-        f = out["v_touchdown"] - v_target
-        vals.append((zb, f))
 
-    if len(vals) < 2:
-        raise RuntimeError("Not enough valid samples to bracket z_burn.")
+        vt = float(out["v_touchdown"])
+        f = vt - float(v_target)
+        err = abs(f)
 
+        vals.append((float(zb), f, out))
+        if best is None or err < best[0]:
+            best = (err, float(zb), out)
+
+    if not vals:
+        raise RuntimeError("No valid simulations in z_burn scan (check t_max / parameters).")
+
+    if best[0] <= tol_v:
+        return best[1], {"feasible": True, "reason": "tol_hit", "final_f": float(best[2]["v_touchdown"]) - v_target}
+
+    # ----- Phase B: sign-bracket bisection if possible -----
     vals.sort(key=lambda x: x[0])
-
-    fs = np.array([f for _, f in vals])
+    fs = np.array([f for _, f, _ in vals], dtype=float)
     have_pos = np.any(fs >= 0.0)
     have_neg = np.any(fs <= 0.0)
 
-    if not (have_pos and have_neg):
-        best = min(vals, key=lambda x: abs(x[1]))
-        return best[0], {"feasible": False, "reason": "infeasible_with_given_thrust", "best_f": best[1]}
+    if have_pos and have_neg:
+        bracket = None
+        for (z1, f1, _), (z2, f2, _) in zip(vals[:-1], vals[1:]):
+            if f1 == 0.0:
+                return z1, {"feasible": True, "reason": "exact_hit"}
+            if f1 * f2 < 0.0:
+                bracket = (z1, z2)
+                break
 
-    bracket = None
-    for (z1, f1), (z2, f2) in zip(vals[:-1], vals[1:]):
-        if f1 == 0.0:
-            return z1, {"feasible": True, "reason": "exact_hit"}
-        if f1 * f2 < 0.0:
-            bracket = (z1, z2)
-            break
+        if bracket is not None:
+            lo, hi = bracket
+            out_lo = sim(lo)
+            out_hi = sim(hi)
+            f_lo = float(out_lo["v_touchdown"]) - v_target
+            f_hi = float(out_hi["v_touchdown"]) - v_target
 
-    if bracket is None:
-        best = min(vals, key=lambda x: abs(x[1]))
-        return best[0], {"feasible": True, "reason": "no_adjacent_bracket_but_close", "best_f": best[1]}
+            for _ in range(max_iter):
+                mid = 0.5 * (lo + hi)
+                out_mid = sim(mid)
+                f_mid = float(out_mid["v_touchdown"]) - v_target
 
-    lo, hi = bracket
-    out_lo = simulate_for_zburn(z0, v0, p, lo)
-    out_hi = simulate_for_zburn(z0, v0, p, hi)
-    f_lo = out_lo["v_touchdown"] - v_target
-    f_hi = out_hi["v_touchdown"] - v_target
+                if abs(f_mid) <= tol_v:
+                    return mid, {"feasible": True, "reason": "tol_hit", "final_f": f_mid}
 
-    for _ in range(max_iter):
-        mid = 0.5 * (lo + hi)
-        out_mid = simulate_for_zburn(z0, v0, p, mid)
-        f_mid = out_mid["v_touchdown"] - v_target
+                if f_lo * f_mid < 0.0:
+                    hi, f_hi = mid, f_mid
+                else:
+                    lo, f_lo = mid, f_mid
 
-        if abs(f_mid) <= tol_v:
-            return mid, {"feasible": True, "reason": "tol_hit", "final_f": f_mid}
+            mid = 0.5 * (lo + hi)
+            out_mid = sim(mid)
+            return mid, {"feasible": True, "reason": "max_iter", "final_f": float(out_mid["v_touchdown"]) - v_target}
 
-        if f_lo * f_mid < 0.0:
-            hi, f_hi = mid, f_mid
-        else:
-            lo, f_lo = mid, f_mid
+    # ----- Phase C: no sign change -> minimize |error| locally -----
+    zs = np.array([z for z, _, _ in vals], dtype=float)
+    k = int(np.argmin([abs(f) for _, f, _ in vals]))
 
-    mid = 0.5 * (lo + hi)
-    out_mid = simulate_for_zburn(z0, v0, p, mid)
-    return mid, {"feasible": True, "reason": "max_iter", "final_f": out_mid["v_touchdown"] - v_target}
+    lo = zs[max(0, k - 1)]
+    hi = zs[min(len(zs) - 1, k + 1)]
+    if hi <= lo:
+        lo = max(z_lo, best[1] - 0.5 * (z0 - z_lo) / 40.0)
+        hi = min(z0, best[1] + 0.5 * (z0 - z_lo) / 40.0)
+
+    refine = np.linspace(lo, hi, 31)
+    for zb in refine:
+        out = sim(float(zb))
+        if out is None or out.get("v_touchdown") is None:
+            continue
+        err = abs(float(out["v_touchdown"]) - v_target)
+        if err < best[0]:
+            best = (err, float(zb), out)
+
+    return best[1], {
+        "feasible": (best[0] <= tol_v),
+        "reason": "min_abs_error_no_bracket",
+        "best_err": best[0],
+        "best_v_touchdown": float(best[2]["v_touchdown"]),
+    }
 
 
 # -------------------- CLI --------------------
@@ -613,9 +690,9 @@ def parse_args() -> argparse.Namespace:
 
     # Initial conditions / search
     p.add_argument("--z0", type=float, default=1500.0, help="Initial height (m).")
-    p.add_argument("--v0", type=float, default=-250.0, help="Initial vertical velocity (m/s), descending is negative.")
+    p.add_argument("--v0", type=float, default=-250.0, help="Initial vertical velocity (m/s); descending is negative.")
     p.add_argument("--v-target", type=float, default=0.0, help="Target touchdown velocity (m/s).")
-    p.add_argument("--tol-v", type=float, default=0.25, help="Touchdown velocity tolerance (m/s) for bisection.")
+    p.add_argument("--tol-v", type=float, default=0.25, help="Touchdown velocity tolerance (m/s).")
     p.add_argument("--max-iter", type=int, default=60, help="Max bisection iterations for z_burn search.")
 
     # Plot options
@@ -627,43 +704,67 @@ def parse_args() -> argparse.Namespace:
     )
 
     # Params fields (every field in Params becomes a CLI arg)
-    p.add_argument("--g", type=float, default=d.g)
-    p.add_argument("--g0", type=float, default=d.g0)
+    p.add_argument("--g", type=float, default=d.g,
+                   help="Gravity magnitude (m/s^2). Acceleration term is -g in dv/dt.")
+    p.add_argument("--g0", type=float, default=d.g0,
+                   help="Standard gravity used for Isp mass-flow conversion (m/s^2).")
 
-    p.add_argument("--diameter-m", type=float, default=d.diameter_m, dest="diameter_m")
-    p.add_argument("--m-dry", type=float, default=d.m_dry, dest="m_dry")
-    p.add_argument("--prop-total", type=float, default=d.prop_total, dest="prop_total")
-    p.add_argument("--landing-prop-frac", type=float, default=d.landing_prop_frac, dest="landing_prop_frac")
+    p.add_argument("--diameter-m", type=float, default=d.diameter_m, dest="diameter_m",
+                   help="Rocket diameter (m) used to compute reference area for drag.")
+    p.add_argument("--m-dry", type=float, default=d.m_dry, dest="m_dry",
+                   help="Dry mass (kg). If m <= m_dry, engines cannot burn propellant.")
+    p.add_argument("--prop-total", type=float, default=d.prop_total, dest="prop_total",
+                   help="Total propellant mass (kg) for the full vehicle.")
+    p.add_argument("--landing-prop-frac", type=float, default=d.landing_prop_frac, dest="landing_prop_frac",
+                   help="Fraction of total prop reserved for landing (dimensionless).")
 
-    p.add_argument("--isp-s", type=float, default=d.Isp_s, dest="Isp_s")
-    p.add_argument("--t-engine-max-n", type=float, default=d.T_engine_max_N, dest="T_engine_max_N")
-    p.add_argument("--throttle", type=float, default=d.throttle)
-    p.add_argument("--n-engines", type=int, default=d.n_engines, dest="n_engines")
+    p.add_argument("--isp-s", type=float, default=d.Isp_s, dest="Isp_s",
+                   help="Specific impulse (s) used for mdot = -T/(Isp*g0).")
+    p.add_argument("--t-engine-max-n", type=float, default=d.T_engine_max_N, dest="T_engine_max_N",
+                   help="Maximum thrust per engine at full throttle (N).")
+    p.add_argument("--throttle", type=float, default=d.throttle,
+                   help="Throttle fraction (0..1) used ONLY during the constant-thrust burn phase.")
+    p.add_argument("--n-engines", type=int, default=d.n_engines, dest="n_engines",
+                   help="Number of engines (scales total thrust).")
 
-    p.add_argument("--rho0", type=float, default=d.rho0)
-    p.add_argument("--H", type=float, default=d.H)
-    p.add_argument("--Cd", type=float, default=d.Cd)
+    p.add_argument("--rho0", type=float, default=d.rho0,
+                   help="Sea-level air density (kg/m^3) for the exponential atmosphere model.")
+    p.add_argument("--H", type=float, default=d.H,
+                   help="Atmospheric scale height (m) in rho(z) = rho0 * exp(-z/H).")
+    p.add_argument("--Cd", type=float, default=d.Cd,
+                   help="Drag coefficient (dimensionless). Set 0 to disable drag.")
 
-    p.add_argument("--t-max", type=float, default=d.t_max, dest="t_max")
-    p.add_argument("--max-step", type=float, default=d.max_step, dest="max_step")
+    p.add_argument("--t-max", type=float, default=d.t_max, dest="t_max",
+                   help="Max integration duration (s) allowed per phase (burn/hover/final).")
+    p.add_argument("--max-step", type=float, default=d.max_step, dest="max_step",
+                   help="Max internal step size (s) for solve_ivp.")
 
-    p.add_argument("--z-floor", type=float, default=d.z_floor, dest="z_floor")
+    p.add_argument("--z-floor", type=float, default=d.z_floor, dest="z_floor",
+                   help="Hard floor height (m). Simulation terminates when z reaches z_floor.")
 
     p.add_argument(
         "--enable-hover",
         action=argparse.BooleanOptionalAction,
         default=d.enable_hover,
         dest="enable_hover",
+        help="Enable hover phase (PD controller) once z <= z_hover_start.",
     )
-    p.add_argument("--z-hover-start", type=float, default=d.z_hover_start, dest="z_hover_start")
-    p.add_argument("--t-hover", type=float, default=d.t_hover, dest="t_hover")
-    p.add_argument("--z-ref", type=float, default=d.z_ref, dest="z_ref")
+    p.add_argument("--z-hover-start", type=float, default=d.z_hover_start, dest="z_hover_start",
+                   help="When z decreases to this height (m), switch from burn to hover controller.")
+    p.add_argument("--t-hover", type=float, default=d.t_hover, dest="t_hover",
+                   help="Hover duration (s) before switching to final approach.")
+    p.add_argument("--z-ref", type=float, default=d.z_ref, dest="z_ref",
+                   help="Hover altitude setpoint (m) used by the PD controller during hover.")
 
-    p.add_argument("--Kp", type=float, default=d.Kp)
-    p.add_argument("--Kd", type=float, default=d.Kd)
+    p.add_argument("--Kp", type=float, default=d.Kp,
+                   help="Hover/landing PD proportional gain (accel per meter).")
+    p.add_argument("--Kd", type=float, default=d.Kd,
+                   help="Hover/landing PD derivative gain (accel per (m/s)).")
 
-    p.add_argument("--throttle-min", type=float, default=d.throttle_min, dest="throttle_min")
-    p.add_argument("--v-land-ref", type=float, default=d.v_land_ref, dest="v_land_ref")
+    p.add_argument("--throttle-min", type=float, default=d.throttle_min, dest="throttle_min",
+                   help="Minimum throttle fraction (0..1) for controller clamp.")
+    p.add_argument("--v-land-ref", type=float, default=d.v_land_ref, dest="v_land_ref",
+                   help="Final approach velocity reference (m/s). Negative means descending.")
 
     return p.parse_args()
 
@@ -723,12 +824,15 @@ def main():
     out = simulate_for_zburn(z0, v0, p, z_burn)
 
     print("\n=== Result ===")
+    print(f"z0                = {z0:.2f} m")
+    print(f"v0                = {v0:.2f} m/s")
+    print(f"v_target          = {v_target:.2f} m/s")
     print(f"z_floor           = {p.z_floor:.6f} m")
     print(f"T_const           = {p.T_const/1000:.1f} kN  (burn throttle={p.throttle:.2f}, engines={p.n_engines})")
     print(f"T_max(ctrl)       = {p.T_max/1000:.1f} kN  (controller limit)")
     print(f"m0                = {p.m0:.1f} kg   (m_dry={p.m_dry:.1f} kg)")
     print(f"z_burn_start      = {z_burn:.2f} m")
-    print(f"t_burn_start      = {out['t_burn']}")
+    print(f"t_burn_start      = {out.get('t_burn')}")
     print(f"t_hover_start     = {out.get('t_hover_start')}")
     print(f"t_hover_end       = {out.get('t_hover_end')}")
     print(f"t_touchdown       = {out.get('t_touchdown')}")
@@ -736,8 +840,11 @@ def main():
     print(f"m_touchdown       = {out.get('m_touchdown'):.1f} kg")
     print(f"status            = {out['status']}")
     print(f"search_feasible   = {info.get('feasible')} ({info.get('reason')})")
+    if info.get("reason") == "min_abs_error_no_bracket" and not info.get("feasible"):
+        print(f"[WARN] Could not reach tol_v={float(args.tol_v):.3f} m/s; best_err={info.get('best_err'):.3f} m/s "
+              f"(best_v_touchdown={info.get('best_v_touchdown'):.3f} m/s).")
 
-    # ---- Plot (final approach removed by default) ----
+    # ---- Plot ----
     fig, ax = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
 
     if out["t_coast"].size > 0:
@@ -760,18 +867,15 @@ def main():
         ax[1].plot(out["t_land_seg"], out["y_land_seg"][1], label="final approach (PD)")
         ax[2].plot(out["t_land_seg"], out["y_land_seg"][2], label="final approach (PD)")
 
-    # Reference lines
     ax[0].axhline(p.z_floor, linestyle="--", linewidth=1.0, alpha=0.4, color="gray")
     ax[1].axhline(0.0, linestyle="--", linewidth=1.0, alpha=0.4, color="gray")
 
-    # Mark key times
-    if out["t_burn"] is not None:
+    if out.get("t_burn") is not None:
         for a in ax:
             a.axvline(out["t_burn"], linestyle=":", linewidth=1.2, alpha=0.7, color="gray")
     if out.get("t_hover_start") is not None:
         for a in ax:
             a.axvline(out["t_hover_start"], linestyle=":", linewidth=1.2, alpha=0.7, color="gray")
-    # Only mark hover-end if we are plotting final approach (otherwise it's a "line to nowhere")
     if bool(args.plot_final_approach) and out.get("t_hover_end") is not None:
         for a in ax:
             a.axvline(out["t_hover_end"], linestyle=":", linewidth=1.2, alpha=0.7, color="gray")

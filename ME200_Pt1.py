@@ -37,16 +37,16 @@ import matplotlib.pyplot as plt
 # Constants
 g = 9.80665  # m/s^2
 
-z_floor = 10.0   # m
-z_error = 90.0   # m
-z_hover_start = z_floor + z_error
-
 diameter_m = 3.7
 area_ref = np.pi * (diameter_m / 2.0) ** 2
 
 # Initial conditions
-z0 = 3000.0    # m
+z0 = 5000.0    # m
 v0 = -250.0    # m/s
+z_floor = 10.0   # m
+z_error = 90.0   # m
+z_safety = (2.0 / 30.0) * z0 # m
+z_hover_start = z_floor + z_error
 
 prop_total = 395700.0  # kg (full)
 m_dry = 25600.0        # kg
@@ -162,6 +162,15 @@ def event_reach(z_target):
     f.direction = 0
     return f
 
+def touchdown_info(segments):
+    for seg in segments:
+        sol = seg["sol"]
+        if sol.t_events and len(sol.t_events) > 0 and len(sol.t_events[-1]) > 0:
+            t_td = float(sol.t_events[-1][0])
+            z_td, v_td, m_td = sol.y_events[-1][0]
+            return True, t_td, float(z_td), float(v_td), float(m_td)
+    return False, None, None, None, None
+
 # Simulation (t_max is DURATION PER PHASE; guarded phase transitions)
 def simulate_system(
     z_burn,
@@ -240,7 +249,7 @@ def simulate_system(
     # Phase 3: hover for t_hover (or touchdown)
     t2 = sol2.t[-1]
     y2 = sol2.y[:, -1]
-    hover_law = thrust_pd(z_target=z_hover_start, v_target=-0.5, kp=kp_hover, kd=kd_hover)
+    hover_law = thrust_pd(z_target=z_hover_start, v_target=0.0, kp=kp_hover, kd=kd_hover)
 
     sol3 = run_segment(
         "hover (PD)",
@@ -255,18 +264,19 @@ def simulate_system(
         return segments
 
     # Phase 4: final approach to touchdown
-    t3 = sol3.t[-1]
-    y3 = sol3.y[:, -1]
-    final_law = thrust_pd(z_target=z_floor, v_target=0.0, kp=kp_final, kd=kd_final)
+    # NOT NECESSARY FOR OUR USECASE
+    # t3 = sol3.t[-1]
+    # y3 = sol3.y[:, -1]
+    # final_law = thrust_pd(z_target=z_floor, v_target=0.0, kp=kp_final, kd=kd_final)
 
-    _ = run_segment(
-        "final approach (PD)",
-        final_law,
-        t_start=t3,
-        y_start=y3,
-        events=[event_touchdown()],
-        duration=t_max
-    )
+    # _ = run_segment(
+    #     "final approach (PD)",
+    #     final_law,
+    #     t_start=t3,
+    #     y_start=y3,
+    #     events=[event_touchdown()],
+    #     duration=t_max
+    # )
 
     return segments
 
@@ -423,10 +433,17 @@ if __name__ == "__main__":
     print(f"T/W at start = {T_max / (m0*g):.3f}")
 
     z_burn = find_zburn(v_target=-0.25, tol=0.05)
+    z_burn += z_safety  # start (z_safety)m earlier than “minimum” solution
     print(f"Chosen z_burn = {z_burn:.3f} m")
 
     segments = simulate_system(z_burn)
     t, Y = concat_segments(segments)
+    
+    hit, t_td, z_td, v_td, m_td = touchdown_info(segments)
+    if hit:
+        print(f"Touchdown detected: True at t={t_td:.3f} s (z={z_td:.3f} m, v={v_td:.3f} m/s, m={m_td:.1f} kg)")
+    else:
+        print("Touchdown detected: False (no touchdown event triggered in any phase)")
 
     if Y.shape[0] > 0:
         print(f"Final state: z={Y[-1,0]:.3f} m, v={Y[-1,1]:.3f} m/s, m={Y[-1,2]:.1f} kg")

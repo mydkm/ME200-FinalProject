@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 
 # Phases:
 #   1) Coast (T=0) until z hits z_burn.
-#   2) Burn (constant thrust) until z hits z_hover_start (or z_floor)
+#   2) Burn until z hits z_hover_start (or z_floor)
 #   3) Hover controller (PD) for t_hover (or until z_floor)
 
 # Constants

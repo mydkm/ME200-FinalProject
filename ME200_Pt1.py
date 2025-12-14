@@ -46,12 +46,12 @@ v0 = -250.0    # m/s
 z_floor = 10.0   # m
 z_error = 90.0   # m
 z_safety = (2.0 / 30.0) * z0 # m
+v_safety = 0.001 * v0 # m/s
 z_hover_start = z_floor + z_error
 
 prop_total = 395700.0  # kg (full)
 m_dry = 25600.0        # kg
 landing_prop_frac = 0.03 
-
 m0 = m_dry + landing_prop_frac * prop_total # IMPORTANT: start with *landing* mass
 
 # Engine
@@ -432,7 +432,7 @@ if __name__ == "__main__":
     print(f"Initial mass m0 = {m0:.1f} kg")
     print(f"T/W at start = {T_max / (m0*g):.3f}")
 
-    z_burn = find_zburn(v_target=-0.25, tol=0.05)
+    z_burn = find_zburn(v_target= 0.00 + v_safety, tol = 0.05)
     z_burn += z_safety  # start (z_safety)m earlier than “minimum” solution
     print(f"Chosen z_burn = {z_burn:.3f} m")
 

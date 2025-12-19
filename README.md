@@ -42,17 +42,21 @@ So the 2D vehicle can “waste” altitude/time while it’s settling attitude a
 - descending means $v < 0$
 
 **State**
+
 $$
 y = [z,\ v,\ m]
 $$
 
 **Equations of motion**
+
 $$
 \dot z = v
 $$
+
 $$
 \dot v = \frac{T(t,z,v,m) + F_D(v,z) - mg}{m}
 $$
+
 $$
 \dot m = -\frac{T}{I_{sp}g}\quad \text{(only when burning and } m>m_{\mathrm{dry}} \text{)}
 $$
@@ -63,6 +67,7 @@ $$
 $$
 \rho(z) = \rho_0 e^{-z/H}
 $$
+
 - Drag force (opposes velocity):
 $$
 F_D = -\tfrac12\,\rho(z)\,C_D\,A_{\mathrm{ref}}\,v|v|

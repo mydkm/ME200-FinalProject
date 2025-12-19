@@ -340,7 +340,7 @@ In the 2D state plot, the legend is intentionally placed **only on the top subpl
 J. Davidov, “ME200 Final Project: suicide-burn descent simulation (1D + 2D) with event-driven phases and z_burn tuning,” Dec. 2025.
 ```
 
-```
+```text
 shahar603, “Telemetry-Data: A collection of telemetry captured from SpaceX Launch Webcasts,” GitHub repository, last updated Jan. 24, 2020. [Online]. Available: https://github.com/shahar603/Telemetry-Data
 . Accessed: Dec. 18, 2025.
 ```

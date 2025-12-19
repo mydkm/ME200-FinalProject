@@ -319,23 +319,18 @@ In the 2D state plot, the legend is intentionally placed **only on the top subpl
 
 ## 6. Assumptions and Limitations
 
-**Shared**
-
-- Point‑mass translation model (no 3D wind, no lift)
-- Simplified drag model (constant $C_D$, fixed reference area)
-- Engine modeled as instantaneous thrust command with saturation
-- No engine spool dynamics; no gimbal limits beyond the simple torque model in 2D
-
-**1D**
-
-- No attitude dynamics (rocket is always perfectly vertical)
-- No horizontal motion; all thrust is effectively vertical
-
-**2D**
-
-- Planar motion only (no yaw/roll)
-- Torque model is idealized (two thrusters / lever‑arm abstraction)
-- Without an explicit lateral guidance law, $v_x$ is not actively driven to zero unless you add a tilt reference strategy
+- This is a point-mass translation model where lift and 3D wind is neglected.
+- $I_{sp}$ and $\dot{m}$ are constant.
+- Gravity is constant where $g = 9.80655\,\text{m/s}^2$.
+- Drag model is simplified to constant $C_d$.
+- Rocket engine is modeled as an instantaneous thrust command with saturation.
+- No engine spool dynamics and gimbal limits beyond the simple torque model in 2D.
+- Torque is modeled with an idealized two-thruster lever-arm approximation.
+- Scenario A assumes 1D motion in which there are no attitude dynamics and the rocket is perfectly vertical.
+- No horizontal motion in Scenario A, so all thrust is effectively vertical.
+- The two thrusters are modeled as one thrust $T(t)$ in Scenario A.
+- Rocket motion is planar.
+- Thrust is bounded: $0 \le T \le T_{\max}$, and thrust is set to zero if $m \le m_{\text{dry}}$.
 
 ---
 

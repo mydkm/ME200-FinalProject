@@ -116,7 +116,7 @@ $$
 \dot v_x &= \frac{u_1}{m}\sin\theta + \frac{D_x}{m}, \\
 \dot v_z &= \frac{u_1}{m}\cos\theta - g + \frac{D_z}{m}, \\
 \dot\theta &= \omega, \\
-\dot\omega &= \frac{\tau}{I(m)}, \\
+\dot\omega &= \frac{\tau}{I(\dot m)} \\
 \dot m &= -\frac{u_1}{I_{sp}g}\quad \text{(only when burning and } m>m_{\mathrm{dry}}\text{)}.
 \end{aligned}
 $$

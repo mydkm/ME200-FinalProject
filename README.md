@@ -19,16 +19,6 @@ Both use:
 
 The “final” deliverable is a working simulation that, given an initial condition at altitude $z_0$, computes a physically constrained descent and selects a burn start altitude $z_{\text{burn}}$ such that touchdown vertical speed is near a target value (typically close to $0$ from below), with optional safety margins.
 
-### Why 1D and 2D can disagree on $z_{\text{burn}}$
-
-The **2D model** is not “just 1D with an extra axis.” It includes:
-
-- **Attitude reorientation time** (Phase 0 LQR) before the coast/burn logic
-- **Tilt losses** via the $\cos\theta$ factor in vertical thrust effectiveness
-- **Torque realism** via thruster allocation constraints
-
-So the 2D vehicle can “waste” altitude/time while it’s settling attitude and/or while thrust is not perfectly vertical, which shifts the tuned $z_{\text{burn}}$ compared to 1D.
-
 ---
 
 ## 1. Models (as implemented)
@@ -78,10 +68,12 @@ $$
 **Phases**
 
 1. **Coast:** $T=0$ until $z=z_{\text{burn}}$ (or touchdown)
-2. **Burn (profiled):** track the velocity reference
+2. **Burn (profiled):** track the velocity reference:
+
    $$
    v_{\text{ref}}(z) = -\sqrt{2a_{\text{des}}(z-z_{\text{target}})}
    $$
+   
    (with an optional speed cap), then apply mostly velocity feedback + drag feedforward to compute thrust.
 3. **Hover (PD):** hold $z \approx z_{\text{hover start}} = z_{\text{floor}} + z_{\text{error}}$ for $t_{\text{hover}}$ seconds (or until touchdown).
 

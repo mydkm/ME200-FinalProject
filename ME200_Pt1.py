@@ -41,8 +41,8 @@ diameter_m = 3.7
 area_ref = np.pi * (diameter_m / 2.0) ** 2
 
 # Initial conditions
-z0 = 5000.0    # m
-v0 = -250.0    # m/s
+z0 = 15000.0    # m
+v0 = 0.0    # m/s
 z_floor = 10.0   # m
 z_error = 90.0   # m
 z_safety = (2.0 / 30.0) * z0 # m
@@ -199,7 +199,7 @@ def simulate_system(
             rtol=1e-7,
             atol=1e-9
         )
-        segments.append({"label": label, "t": sol.t, "Y": sol.y.T, "sol": sol})
+        segments.append({"label": label, "t": sol.t, "Y": sol.y.T, "sol": sol, "thrust_law": thrust_law})
         return sol
 
     # Phase 1: coast to z_burn (or touchdown)
@@ -387,6 +387,14 @@ def find_zburn(v_target=-0.25, tol=0.05, n_scan=41, max_iter=60):
 
 # Plotting (YIPPEE!)
 def plot_segments(segments):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # Turn on LaTeX-style rendering for text (mathtext; no external LaTeX needed)
+    plt.rcParams["text.usetex"] = False
+    plt.rcParams["mathtext.fontset"] = "cm"
+    plt.rcParams["font.family"] = "serif"
+
     fig, ax = plt.subplots(3, 1, sharex=True, figsize=(10, 8))
 
     # --- FILTER: only plot phases 1-3 ---
@@ -415,12 +423,60 @@ def plot_segments(segments):
             a.axvline(tsw, linestyle="--", linewidth=1)
         a.grid(True)
 
-    ax[0].set_ylabel("m (kg)")
-    ax[1].set_ylabel("z (m)")
-    ax[2].set_ylabel("v (m/s)")
-    ax[2].set_xlabel("t (s)")
+    # ---- LaTeX-style axis labels ----
+    ax[0].set_ylabel(r"$m\;(\mathrm{kg})$")
+    ax[1].set_ylabel(r"$z\;(\mathrm{m})$")
+    ax[2].set_ylabel(r"$v\;(\mathrm{m\,s^{-1}})$")
+    ax[2].set_xlabel(r"$t\;(\mathrm{s})$")
 
     ax[1].axhline(z_floor, linestyle="--", linewidth=1)
+
+    fig2, ax2 = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+
+    for seg in segments_to_plot:
+        t = seg["t"]
+        Y = seg["Y"]
+        z = Y[:, 0]
+        v = Y[:, 1]
+        m = Y[:, 2]
+        label = seg["label"]
+        law = seg.get("thrust_law", thrust_zero)
+
+        T = np.empty_like(t, dtype=float)
+        TW = np.empty_like(t, dtype=float)
+
+        for i, (ti, zi, vi, mi) in enumerate(zip(t, z, v, m)):
+            mi_eff = m_dry if mi <= m_dry else mi
+
+            if mi_eff <= m_dry:
+                Ti = 0.0
+            else:
+                Ti = float(law(ti, zi, vi, mi_eff))
+                Ti = float(np.clip(Ti, 0.0, T_max))
+
+            T[i] = Ti
+            TW[i] = Ti / (mi_eff * g) if mi_eff > 0 else 0.0
+
+        ax2[0].plot(t, T, label=label)
+        ax2[1].plot(t, TW, label=label)
+
+    # optional reference lines
+    ax2[0].axhline(T_max, linestyle="--", linewidth=1)
+    ax2[1].axhline(1.0, linestyle="--", linewidth=1)
+
+    for a in ax2:
+        for tsw in switch_times:
+            a.axvline(tsw, linestyle="--", linewidth=1)
+        a.grid(True)
+
+    # ---- LaTeX-style axis labels ----
+    ax2[0].set_ylabel(r"$T\;(\mathrm{N})$")
+    ax2[1].set_ylabel(r"$T/W\;(-)$")
+    ax2[1].set_xlabel(r"$t\;(\mathrm{s})$")
+
+    ax2[0].legend(loc="best")
+    fig2.suptitle("Thrust and thrust-to-weight ratio (1D)")
+    plt.tight_layout()
 
     ax[0].legend(loc="best")
     fig.suptitle("Vertical suicide-burn simulation with hover phase (1D)")

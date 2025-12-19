@@ -1,164 +1,357 @@
-
 # ME200-FinalProject
 
-This repository contains a **1D vertical “suicide burn” descent simulator** (Falcon 9–ish, upright rocket, no rotation) built with:
 
-- A **3-phase descent model**: coast → profiled burn → hover (PD).
-- A simple **exponential atmosphere + quadratic drag** model.
-- **Thrust saturation** (`0 ≤ T ≤ T_max`) and **propellant limits** (no thrust below `m_dry`).
-- **Event-driven phase transitions** using `solve_ivp()` events.
-- A **z_burn optimizer** that scans + brackets + bisects to hit a target touchdown speed.
-- A plotting utility that visualizes **mass, altitude, and velocity** across phases.
+This repository contains **two “Falcon-9-ish” suicide-burn descent simulators**:
 
-The script integrates the coupled ODE system for state `y = [z, v, m]` and reports whether a touchdown event was detected, the touchdown state, and the final state.
+- **1D vertical model** (upright rocket, no rotation): state $[z, v, m]$
+- **2D planar rigid-body model** (translation + pitch): state $[x, z, v_x, v_z, \theta, \omega, m]$
 
+Both use:
+
+- `scipy.integrate.solve_ivp` with **event-driven phase transitions**
+- A simple **exponential atmosphere + quadratic drag** option
+- **Thrust saturation** and **propellant limits** ($m \ge m_{\mathrm{dry}}$)
+- A **$z_{\text{burn}}$** search routine (scan → bracket → bisection) to hit a target touchdown vertical speed
+- Plotters (with **phase coloring**, **phase boundary markers**, and **LaTeX-style axis labels**)
+
+---
 
 ## 0. Description of the Final
 
-The “final” deliverable for this repository is a working simulation that:
+The “final” deliverable is a working simulation that, given an initial condition at altitude $z_0$, computes a physically constrained descent and selects a burn start altitude $z_{\text{burn}}$ such that touchdown vertical speed is near a target value (typically close to $0$ from below), with optional safety margins.
 
-1. Starts from an initial altitude `z0` with an initial downward velocity `v0 < 0`.
-2. Coasts with **zero thrust** until reaching a chosen burn altitude `z_burn`.
-3. Ignites and performs a **profiled descent** toward a hover-start altitude
-   - Hover-start altitude: `z_hover_start = z_floor + z_error`
-   - Velocity reference (for `z > z_target`): `v_ref(z) = -sqrt(2 * a_des * (z - z_target))`
-     - Then clamp with: `v_ref = max(v_ref, -v_cap)`
-   (capped by `v_cap`) plus a velocity feedback term.
-4. Switches into a **hover controller (PD)** at `z_hover_start` for `t_hover` seconds (or until touchdown).
-5. Detects touchdown when `z(t)` crosses `z_floor` while descending.
-6. Automatically selects a burn start altitude `z_burn` using `find_zburn()` so that the simulated touchdown speed is near a desired target (default `v_target = -0.25 m/s`), then adds a safety margin `z_safety`.
+### Why 1D and 2D can disagree on $z_{\text{burn}}$
 
-### Model (as implemented)
+The **2D model** is not “just 1D with an extra axis.” It includes:
+
+- **Attitude reorientation time** (Phase 0 LQR) before the coast/burn logic
+- **Tilt losses** via the $\cos\theta$ factor in vertical thrust effectiveness
+- **Torque realism** via thruster allocation constraints
+
+So the 2D vehicle can “waste” altitude/time while it’s settling attitude and/or while thrust is not perfectly vertical, which shifts the tuned $z_{\text{burn}}$ compared to 1D.
+
+---
+
+## 1. Models (as implemented)
+
+### 1.1 1D Vertical Suicide-Burn Model
 
 **Sign convention**
-- `+z` is up
-- descending means `v < 0`
+
+- $+z$ is up
+- descending means $v < 0$
+
+**State**
+$$
+y = [z,\ v,\ m]
+$$
 
 **Equations of motion**
-- `dz/dt = v`
-- `dv/dt = (T(t,z,v,m) + F_D(v,z) - m g)/m`
-- `dm/dt = -T/(Isp*g)` when burning and propellant remains
+$$
+\dot z = v
+$$
+$$
+\dot v = \frac{T(t,z,v,m) + F_D(v,z) - mg}{m}
+$$
+$$
+\dot m = -\frac{T}{I_{sp}g}\quad \text{(only when burning and } m>m_{\mathrm{dry}} \text{)}
+$$
 
-**Drag**
-- Atmosphere: `rho(z) = rho_0 * exp(-z/H)`
-- Drag force: `F_D = -0.5 * rho(z) * Cd * A_ref * v * |v|`
-  - This opposes velocity, so for `v<0` drag tends to be positive (upward).
+**Atmosphere + drag**
+
+- Atmosphere:
+$$
+\rho(z) = \rho_0 e^{-z/H}
+$$
+- Drag force (opposes velocity):
+$$
+F_D = -\tfrac12\,\rho(z)\,C_D\,A_{\mathrm{ref}}\,v|v|
+$$
 
 **Thrust constraints**
-- `T` is clamped: `T = clip(T_raw, 0, T_max)`
-- If `m ≤ m_dry`, thrust is forced to `0`.
 
+- $0 \le T \le T_{\max}$
+- If $m \le m_{\mathrm{dry}}$, thrust is forced to $T=0$
 
-## 1. Project Setup
+**Phases**
 
-### 1.1. Requirements
+1. **Coast:** $T=0$ until $z=z_{\text{burn}}$ (or touchdown)
+2. **Burn (profiled):** track a velocity reference
+   $$
+   v_{\text{ref}}(z) = -\sqrt{2a_{\text{des}}(z-z_{\text{target}})}
+   $$
+   then apply mostly velocity feedback + drag feedforward to compute thrust
+3. **Hover (PD):** hold
+   $$
+   z \approx z_{\text{hover start}} = z_{\text{floor}} + z_{\text{error}}
+   $$
+   for $t_{\text{hover}}$ seconds (or until touchdown)
 
-- **Python** ≥ 3.9
-- **NumPy**
-- **SciPy**
-- **Matplotlib**
+**$z_{\text{burn}}$ selection**
 
-### 1.2. Create and Activate a Virtual Environment (recommended)
+- `find_zburn(...)` searches for a burn altitude that makes touchdown velocity $v_{\text{td}}$ near `v_target`
+- A safety margin is optionally added:
+  - `z_burn += z_safety`
+  - `v_target += v_safety`
+
+---
+
+### 1.2 2D Planar Rigid-Body Model (Translation + Pitch)
+
+**Sign convention**
+
+- $+z$ is up
+- $+x$ is horizontal
+- $\theta = 0$ is perfectly upright (body axis aligned with $+z$)
+- $\omega = \dot\theta$
+
+**State**
+$$
+y = [x,\ z,\ v_x,\ v_z,\ \theta,\ \omega,\ m]
+$$
+
+**Virtual inputs**
+
+- $u_1(t)$: **total thrust magnitude** along the rocket body axis (N)
+- $\tau(t)$: **pitch torque** about COM (N·m)
+
+Body-axis unit vector in inertial coordinates:
+$$
+\hat b(\theta) = [\sin\theta,\ \cos\theta]
+$$
+
+**Equations of motion**
+$$
+\dot x = v_x,\quad \dot z = v_z
+$$
+$$
+\dot v_x = \frac{u_1}{m}\sin\theta + \frac{D_x}{m}
+$$
+$$
+\dot v_z = \frac{u_1}{m}\cos\theta - g + \frac{D_z}{m}
+$$
+$$
+\dot\theta = \omega,\quad \dot\omega = \frac{\tau}{I(m)}
+$$
+$$
+\dot m = -\frac{u_1}{I_{sp}g}\quad \text{(only when burning and } m>m_{\mathrm{dry}} \text{)}
+$$
+
+**Pitch inertia**
+
+A simple varying-mass cylinder model:
+$$
+I(m)=\frac{1}{12}m(3R^2 + L^2)
+$$
+
+**Drag**
+
+Optional quadratic drag opposing the velocity vector:
+$$
+\mathbf{D} = -\tfrac12\,\rho(z)\,C_D\,A_{\mathrm{ref}}\,|\mathbf v|\,\mathbf v
+$$
+
+**Two-thruster allocation (realism)**
+
+If enabled, $(u_1,\tau)$ is allocated to two nonnegative thrusters $(T_L,T_R)$ with $0\le T_{L,R}\le T_{\max}$:
+$$
+u_1 = T_L+T_R,\qquad \tau = d(T_R-T_L)
+$$
+Requested $(u_1,\tau)$ may be infeasible; allocation clips the thrusters and returns the **achieved** $(u_1,\tau)$.
+
+**Phases (as coded)**
+
+0. **Attitude LQR (from $t=0$):** reorient until $|\theta|$ and $|\omega|$ satisfy tolerances (or timeout / touchdown)
+1. **Coast:** $u_1=0,\ \tau=0$ until $z=z_{\text{burn}}$
+2. **Burn (profiled + attitude PD):** profiled vertical descent + attitude stabilization
+3. **Hover (z PD + attitude PD)** for $t_{\text{hover}}$ seconds (or touchdown)
+
+**Safety margins (2D)**
+
+The 2D script includes a helper that mirrors the 1D safety behavior:
+
+- shift the tuning target: `v_target + v_safety`
+- start earlier: `z_burn_safe = z_burn_nom + z_safety`
+
+---
+
+## 2. Project Setup
+
+### 2.1 Requirements
+
+- Python ≥ 3.9
+- NumPy
+- SciPy
+- Matplotlib
+
+### 2.2 Install
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate        # Linux / macOS
-# .venv\Scripts\activate         # Windows PowerShell / CMD
+source .venv/bin/activate   # macOS/Linux
+# .venv\Scripts\activate    # Windows
+pip install numpy scipy matplotlib
 ````
 
-### 1.3. Install Python Dependencies
+---
+
+## 3. Running the Simulations
+
+> The scripts are configured via constants near the top (no CLI yet).
+
+### 3.1 Run the 1D model
 
 ```bash
-pip install numpy scipy matplotlib
+python <1d_script_name>.py
 ```
 
-## 2. Running the Code & Available Input Parameters
+Outputs include:
 
-> **Note:** The current script is configured primarily through **constants and function arguments** (it does not yet expose an argparse CLI like `--z0 ...`).
+* chosen $z_{\text{burn}}$
+* touchdown detection and touchdown state
+* plots for $m(t)$, $z(t)$, $v(t)$, plus thrust and $T/W$
 
-### 2.1. Basic Usage
-
-From the repository root, run the main Python script (whatever filename you saved it as):
+### 3.2 Run the 2D model
 
 ```bash
-python <your_script_name>.py
+python <2d_script_name>.py
 ```
 
-You should see terminal output similar to:
+Outputs include:
 
-* Initial mass and thrust-to-weight at ignition
-* The chosen `z_burn`
-* Whether touchdown was detected, with `(t_td, z_td, v_td, m_td)`
-* A Matplotlib window with 3 stacked plots: **mass**, **altitude**, **velocity**
+* chosen $z_{\text{burn}}$ (nominal + safety if enabled)
+* touchdown state $[x,z,v_x,v_z,\theta,\omega,m]$
+* plots for states + controls:
 
-### 2.2. What to Edit for Different Scenarios (common knobs)
+  * $u_1(t)$ (total thrust)
+  * $\tau(t)$ (pitch torque)
 
-Most “inputs” live in the constants section near the top of the script.
+---
 
-| Parameter                          | Meaning                                               | Where it appears                                   |
-| ---------------------------------- | ----------------------------------------------------- | -------------------------------------------------- |
-| `z0`                               | Initial altitude (m)                                  | constants                                          |
-| `v0`                               | Initial vertical velocity (m/s), negative for descent | constants                                          |
-| `z_floor`                          | Ground “floor” altitude (m) used for touchdown event  | constants + `event_touchdown()`                    |
-| `z_error`                          | Hover-start offset above the floor (m)                | constants → `z_hover_start`                        |
-| `m_dry`                            | Dry mass (kg)                                         | constants + `make_rhs()`                           |
-| `prop_total` / `landing_prop_frac` | Landing prop allocation (kg)                          | constants → `m0`                                   |
-| `Isp`                              | Specific impulse (s)                                  | constants + `mdot_from_thrust()`                   |
-| `T_max`                            | Maximum thrust (N)                                    | constants + `make_rhs()`                           |
-| `diameter_m`, `Cd`, `rho_0`, `H`   | Drag model parameters                                 | constants + `drag_force()`                         |
-| `t_hover`                          | Hover duration (s)                                    | `simulate_system(..., t_hover=...)`                |
-| `a_des`, `kd_v`, `v_cap`           | Profiled descent controller tuning                    | `thrust_profiled_descent(...)`                     |
-| `kp_hover`, `kd_hover`             | Hover PD gains                                        | `simulate_system(..., kp_hover=..., kd_hover=...)` |
-| `max_step`, `rtol`, `atol`         | Integrator resolution/accuracy                        | `solve_ivp(...)` calls                             |
-| `v_target`, `tol`, `n_scan`        | z_burn search target + tolerances                     | `find_zburn(...)`                                  |
+## 4. Running the Code & Available Input Parameters
 
-### 2.3. Key Functions (what they do)
+> **Note:** Both scripts are currently configured primarily through **constants near the top of the file** and a few **function arguments** (no CLI yet).
 
-* `simulate_system(z_burn, ...)`
-  Runs phases 1–3 using event-triggered transitions:
+### 4.1 Common “Scenario” Inputs (shared concepts)
 
-  1. **coast**: `T=0` until `z=z_burn` (or touchdown)
-  2. **burn (profiled)**: velocity-profile descent to `z_hover_start` (or touchdown)
-  3. **hover (PD)**: hold `z≈z_hover_start`, `v≈0` for `t_hover` (or touchdown)
+| Parameter                          | Meaning                                                          | Where it appears                                          |
+| ---------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------- |
+| `z0`                               | Initial altitude (m)                                             | constants                                                 |
+| `z_floor`                          | Ground “floor” altitude (m) used for touchdown event             | constants + `event_touchdown()`                           |
+| `z_error`                          | Hover-start offset above the floor (m)                           | constants → `z_hover_start = z_floor + z_error`           |
+| `t_hover`                          | Hover duration (s)                                               | `simulate_system(..., t_hover=...)`                       |
+| `m_dry`                            | Dry mass (kg)                                                    | constants + RHS mass clamp                                |
+| `prop_total` / `landing_prop_frac` | Landing prop allocation (kg fraction)                            | constants → `m0 = m_dry + landing_prop_frac * prop_total` |
+| `Isp`                              | Specific impulse (s)                                             | `mdot` / `dm/dt` equations                                |
+| `Cd`, `rho_0`, `H`, `diameter_m`   | Drag model parameters                                            | `rho_air(...)`, drag functions                            |
+| `USE_DRAG`                         | Toggle drag on/off (2D only; 1D always uses drag in your script) | 2D constants + `drag_force_2d(...)`                       |
 
-* `find_zburn(v_target=-0.25, tol=0.05, n_scan=41, max_iter=60)`
-  Finds an approximate `z_burn` that makes touchdown velocity near `v_target`:
+---
 
-  * coarse scan over `n_scan` candidate altitudes
-  * tries to find a sign-change bracket in `v_td - v_target`
-  * bisection refine if bracket exists
-  * local refinement otherwise
-  * final safety margin is added in `__main__` via `z_burn += z_safety`
+## 4.2 1D Script Parameters (Vertical)
 
-* `plot_segments(segments)`
-  Produces the mass/altitude/velocity plots and marks phase boundaries with dashed vertical lines.
+| Parameter                  | Meaning                                              | Where it appears                                   |
+| -------------------------- | ---------------------------------------------------- | -------------------------------------------------- |
+| `v0`                       | Initial vertical velocity (m/s)                      | constants                                          |
+| `T_max`                    | Maximum thrust (N)                                   | constants + `make_rhs()` thrust clamp              |
+| `area_ref`                 | Reference area for drag                              | constants                                          |
+| `a_des`                    | Aggressiveness of velocity profile (m/s²)            | `thrust_profiled_descent(..., a_des=...)`          |
+| `kd_v`                     | Velocity tracking gain for profiled burn             | `thrust_profiled_descent(..., kd_v=...)`           |
+| `v_cap`                    | Cap on downward reference speed magnitude            | `thrust_profiled_descent(..., v_cap=...)`          |
+| `kp_hover`, `kd_hover`     | Hover PD gains (altitude + velocity feedback)        | `simulate_system(..., kp_hover=..., kd_hover=...)` |
+| `max_step`, `rtol`, `atol` | Integrator resolution / accuracy                     | each `solve_ivp(...)` call                         |
+| `v_target`                 | Target touchdown vertical speed (m/s)                | `find_zburn(v_target=...)`                         |
+| `tol`                      | Acceptable touchdown-speed error band                | `find_zburn(tol=...)`                              |
+| `n_scan`                   | Number of coarse scan samples for `z_burn` search    | `find_zburn(n_scan=...)`                           |
+| `max_iter`                 | Max bisection iterations                             | `find_zburn(max_iter=...)`                         |
+| `z_safety`                 | “Start burn earlier” margin added after tuning (m)   | `z_burn += z_safety` in `__main__`                 |
+| `v_safety`                 | Safety shift applied to target touchdown speed (m/s) | `find_zburn(v_target=... + v_safety)`              |
 
-### 2.4. Example: Change the Target Touchdown Speed
+---
 
-In `__main__`, edit:
+## 4.3 2D Script Parameters (Planar Rigid-Body)
 
-```python
-z_burn = find_zburn(v_target=-0.25, tol=0.05)
+### Geometry / actuation
+
+| Parameter                 | Meaning                                           | Where it appears                |
+| ------------------------- | ------------------------------------------------- | ------------------------------- |
+| `R`, `L`                  | Rocket radius + length (m)                        | geometry + inertia model        |
+| `d_thruster`              | Lever arm for two-thruster torque model (m)       | allocation + torque feasibility |
+| `T_max`                   | Max thrust per engine (N)                         | constants                       |
+| `u1_max`                  | Total max thrust (N), typically `2*T_max`         | constants                       |
+| `USE_THRUSTER_ALLOCATION` | Whether to allocate ((u_1,\tau)) into ((T_L,T_R)) | RHS allocation step             |
+| `tau_max_independent`     | Torque cap used only if allocation is disabled    | constants                       |
+
+### Initial conditions / attitude
+
+| Parameter                    | Meaning                                      | Where it appears                          |
+| ---------------------------- | -------------------------------------------- | ----------------------------------------- |
+| `x0`, `vx0`                  | Initial horizontal position/velocity         | constants                                 |
+| `vz0`                        | Initial vertical velocity                    | constants                                 |
+| `theta0`, `omega0`           | Initial pitch angle and pitch rate           | constants                                 |
+| `theta_tol_deg`, `omega_tol` | Attitude “settled” tolerances for ending LQR | constants + `event_attitude_settled(...)` |
+
+### Controllers / tuning
+
+| Parameter                          | Meaning                                                  | Where it appears                                              |
+| ---------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------- |
+| `q_theta`, `q_omega`, `r_tau`      | LQR weights for attitude settle phase                    | `lqr_gain_attitude(...)`                                      |
+| `a_des`, `kd_v`                    | Profiled descent parameters (vertical velocity tracking) | `make_ctrl_profiled_descent(...)`                             |
+| `kp_theta_burn`, `kd_theta_burn`   | Attitude PD gains during burn                            | `make_ctrl_profiled_descent(..., kp_theta=..., kd_theta=...)` |
+| `kp_z`, `kd_z`                     | Hover vertical PD gains                                  | `make_ctrl_hover(..., kp_z=..., kd_z=...)`                    |
+| `kp_theta_hover`, `kd_theta_hover` | Attitude PD gains during hover                           | `make_ctrl_hover(..., kp_theta=..., kd_theta=...)`            |
+| `t_max_phase`                      | Max duration allowed per phase                           | `run_segment(..., duration=t_max_phase)`                      |
+| `max_step`, `rtol`, `atol`         | Integrator resolution / accuracy                         | `solve_ivp(...)`                                              |
+
+### 2D (z_{\text{burn}}) + safety margins
+
+| Parameter                   | Meaning                                              | Where it appears                            |
+| --------------------------- | ---------------------------------------------------- | ------------------------------------------- |
+| `v_target`                  | Target touchdown vertical speed (v_z) (m/s)          | `find_zburn(v_target=...)`                  |
+| `tol`, `n_scan`, `max_iter` | Search tolerances and scan/bisection controls        | `find_zburn(...)`                           |
+| `USE_SAFETY_MARGINS`        | Toggle safety behavior                               | constants + `choose_zburn_with_safety(...)` |
+| `z_safety`                  | “Start burn earlier” margin (m)                      | `zb_safe = zb_nom + z_safety`               |
+| `v_safety`                  | Safety shift applied to target touchdown speed (m/s) | `find_zburn(v_target + v_safety, ...)`      |
+
+
+---
+
+## 5. Plotting Notes
+
+Both scripts:
+
+* mark phase boundaries with vertical dashed lines
+* use **phase coloring**
+* render axis labels with **LaTeX-style mathtext** (no external LaTeX install required)
+
+In the 2D state plot, the legend is intentionally placed **only on the top subplot** to avoid duplication.
+
+---
+
+## 6. Assumptions and Limitations
+
+**Shared**
+
+* Point-mass translation model (no 3D wind, no lift)
+* Simplified drag model (constant (C_D), reference area fixed)
+* Engine modeled as instantaneous thrust command with saturation
+* No engine spool dynamics, no gimbal limits beyond the simple torque model in 2D
+
+**1D**
+
+* No attitude dynamics (rocket is always “perfectly vertical”)
+* No horizontal motion; all thrust is effectively vertical
+
+**2D**
+
+* Planar motion only (no yaw/roll)
+* Torque model is idealized (two thrusters / lever arm abstraction)
+* Without an explicit lateral guidance law, (v_x) is not actively driven to zero unless you add a tilt reference strategy
+
+---
+
+## 7. Reference
+
 ```
-
-For a “softer” target touchdown (closer to 0 from below), try:
-
-```python
-z_burn = find_zburn(v_target=-0.10, tol=0.05)
-```
-
-### 2.5. Example: Adjust the Descent Aggressiveness
-
-Inside `simulate_system`, the burn controller is constructed as:
-
-```python
-burn_law = thrust_profiled_descent(z_target=z_hover_start, a_des=a_des, kd_v=kd_v)
-```
-
-Increase `a_des` for more aggressive deceleration (at the cost of more thrust/prop usage), or adjust `kd_v` for tighter/looser velocity tracking.
-
-## 3. References
-
-```
-J. Davidov, “Prompt to ChatGPT 5.2 Thinking requesting README.md generation,” ChatGPT 5.2 Thinking (large language model), OpenAI, prompt: “Write a README.md file similar in style to the following … in respect to the repository at ‘[https://github.com/mydkm/ME200-FinalProject’](https://github.com/mydkm/ME200-FinalProject’) … ” Dec. 14, 2025.
+J. Davidov, “ME200 Final Project: suicide-burn descent simulation (1D + 2D) with event-driven phases and z_burn tuning,” Dec. 2025.
 ```

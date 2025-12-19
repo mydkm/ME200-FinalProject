@@ -64,11 +64,13 @@ $$
 **Atmosphere + drag**
 
 - Atmosphere:
+
 $$
 \rho(z) = \rho_0 e^{-z/H}
 $$
 
 - Drag force (opposes velocity):
+
 $$
 F_D = -\tfrac12\,\rho(z)\,C_D\,A_{\mathrm{ref}}\,v|v|
 $$
@@ -81,16 +83,20 @@ $$
 **Phases**
 
 1. **Coast:** $T=0$ until $z=z_{\text{burn}}$ (or touchdown)
-2. **Burn (profiled):** track a velocity reference
+2. **Burn (profiled):** track a velocity reference:
+
    $$
    v_{\text{ref}}(z) = -\sqrt{2a_{\text{des}}(z-z_{\text{target}})}
    $$
-   then apply mostly velocity feedback + drag feedforward to compute thrust
+
+   then apply mostly velocity feedback + drag feedforward to compute thrust.
 3. **Hover (PD):** hold
+
    $$
    z \approx z_{\text{hover start}} = z_{\text{floor}} + z_{\text{error}}
    $$
-   for $t_{\text{hover}}$ seconds (or until touchdown)
+
+   for $t_{\text{hover}}$ seconds (or until touchdown).
 
 **$z_{\text{burn}}$ selection**
 

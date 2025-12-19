@@ -68,12 +68,7 @@ $$
 **Phases**
 
 1. **Coast:** $T=0$ until $z=z_{\text{burn}}$ (or touchdown)
-2. **Burn (profiled):** track the velocity reference:
-
-   $$
-   v_{\text{ref}}(z) = -\sqrt{2a_{\text{des}}(z-z_{\text{target}})}
-   $$
-   
+2. **Burn (profiled):** track the velocity reference $v_z = -\sqrt{2a_{des}(z-z_{target})}$
    (with an optional speed cap), then apply mostly velocity feedback + drag feedforward to compute thrust.
 3. **Hover (PD):** hold $z \approx z_{\text{hover start}} = z_{\text{floor}} + z_{\text{error}}$ for $t_{\text{hover}}$ seconds (or until touchdown).
 

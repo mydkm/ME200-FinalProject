@@ -29,8 +29,7 @@ https://github.com/user-attachments/assets/3d70422b-51b3-48f5-a635-3d323a5a57bd
 
 ### 2D Model:
 
-https://github.com/user-attachments/assets/3dd5184a-cea9-4fb3-a7a7-6d6a7462e228
-
+https://github.com/user-attachments/assets/ac52e106-4d4c-40aa-85f5-6c703e504be1
 
 ## 1. Models (as implemented)
 

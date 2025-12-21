@@ -21,6 +21,17 @@ The “final” deliverable is a working simulation that, given an initial condi
 
 ---
 
+## 0.1 Videos of Simulations
+
+### 1D Model:
+
+https://github.com/user-attachments/assets/3d70422b-51b3-48f5-a635-3d323a5a57bd
+
+### 2D Model:
+
+https://github.com/user-attachments/assets/3dd5184a-cea9-4fb3-a7a7-6d6a7462e228
+
+
 ## 1. Models (as implemented)
 
 ### 1.1 1D Vertical Suicide‑Burn Model
